@@ -1,13 +1,14 @@
-import torch.nn as nn
-from mmcv.cnn import normal_init
+import tensorflow as tf
+from tensorflow.keras import layers
 
-from ..registry import HEADS
-from .base import BaseHead
+from .base_tf import BaseHeadTF
 
+# Note: registry functionality is not implemented in this snippet.
+# from ..registry import HEADS
+# @HEADS.register_module()
 
-@HEADS.register_module()
-class AudioTSNHead(BaseHead):
-    """Classification head for TSN on audio.
+class AudioTSNHeadTF(BaseHeadTF):
+    """Classification head for TSN on audio in TensorFlow.
 
     Args:
         num_classes (int): Number of classes to be classified.
@@ -36,38 +37,43 @@ class AudioTSNHead(BaseHead):
         self.init_std = init_std
 
         if self.spatial_type == 'avg':
-            # use `nn.AdaptiveAvgPool2d` to adaptively match the in_channels.
-            self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+            self.avg_pool = layers.GlobalAveragePooling2D(data_format='channels_first')
         else:
             self.avg_pool = None
 
         if self.dropout_ratio != 0:
-            self.dropout = nn.Dropout(p=self.dropout_ratio)
+            self.dropout = layers.Dropout(self.dropout_ratio)
         else:
             self.dropout = None
-        self.fc_cls = nn.Linear(self.in_channels, self.num_classes)
+        
+        self.fc_cls = layers.Dense(
+            self.num_classes,
+            kernel_initializer=tf.keras.initializers.RandomNormal(stddev=self.init_std)
+        )
 
     def init_weights(self):
         """Initiate the parameters from scratch."""
-        normal_init(self.fc_cls, std=self.init_std)
+        # Weight initialization is handled in the layer constructor in TF Keras.
+        # This method is kept for API consistency.
+        pass
 
-    def forward(self, x):
+    def call(self, x, **kwargs):
         """Defines the computation performed at every call.
 
         Args:
-            x (torch.Tensor): The input data.
+            x (tf.Tensor): The input data.
+                (N, in_channels, H, W) for 'channels_first' data format.
 
         Returns:
-            torch.Tensor: The classification scores for input samples.
+            tf.Tensor: The classification scores for input samples.
         """
-        # [N * num_segs, in_channels, h, w]
-        x = self.avg_pool(x)
-        # [N, in_channels, 1, 1]
-        x = x.view(x.size(0), -1)
+        # [N, in_channels, h, w]
+        if self.avg_pool:
+            x = self.avg_pool(x)
         # [N, in_channels]
         if self.dropout is not None:
-            x = self.dropout(x)
+            x = self.dropout(x, **kwargs)
         # [N, in_channels]
         cls_score = self.fc_cls(x)
         # [N, num_classes]
-        return cls_score
+        return cls_score 
