@@ -18,9 +18,23 @@ from .snippet_sample_resnet_ams import SnippetSampling_ResNetAMS
 from .ams_resnet3d import AMSResNet3d
 from .ams_resnet3d_slowonly import AMSResNet3dSlowOnly
 
+from .ams_2D_module_tf import AMS2DModule_TF
+from .ams_3D_module_tf import AMS3DModule_TF
+from .ams_resnet3d_slowfast_tf import AMSResNet3dSlowFast_TF
+from .ams_resnet3d_slowonly_tf import AMSResNet3dSlowOnly_TF
+from .ams_resnet3d_tf import AMSResNet3d_TF
+from .resnet_ams_tf import ResNetAMS_TF
+from .resnet_audio_tf import ResNetAudio_TF
+from .resnet_tin_tf import ResNetTIN_TF
+from .resnet_tsm_tf import ResNetTSM_TF
+from .resnet_tf import ResNet as ResNet_TF
+from .snippet_sample_resnet_ams import SnippetSampleResNetAMS
+
 __all__ = [
     'C3D', 'ResNet', 'ResNet3d', 'ResNetTSM', 'ResNet2Plus1d',
     'ResNet3dSlowFast', 'ResNet3dSlowOnly', 'ResNet3dCSN', 'ResNetTIN', 'X3D',
-    'ResNetAudio', 'ResNet3dLayer', 'MobileNetV2TSM', 'MobileNetV2', 'TANet','ResNetAMS',
-    'SnippetSampling_ResNetAMS', 'AMSResNet3d', 'AMSResNet3dSlowOnly'
+    'ResNetAudio', 'ResNet3dLayer', 'MobileNetV2TSM', 'MobileNetV2', 'TANet',
+    'ResNetAMS', 'SnippetSampling_ResNetAMS', 'AMSResNet3d', 'AMSResNet3dSlowOnly',
+    'AMS2DModule_TF', 'AMS3DModule_TF', 'AMSResNet3d_TF', 'AMSResNet3dSlowOnly_TF',
+    'AMSResNet3dSlowFast_TF', 'SnippetSampleResNetAMS', 'ResNetAMS_TF', 'ResNet_TF'
 ]

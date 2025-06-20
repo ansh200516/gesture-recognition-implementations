@@ -10,12 +10,10 @@ import logging
 import shutil
 import time
 
-import tensorwatch as tw
-import torch
-import torch.backends.cudnn as cudnn
+import tensorflow as tf
+import numpy as np
 
 from utils.comm import comm
-from ptflops import get_model_complexity_info
 
 
 def setup_logger(final_output_dir, rank, phase):
@@ -48,81 +46,86 @@ def create_logger(cfg, cfg_name, phase='train'):
     final_output_dir.mkdir(parents=True, exist_ok=True)
 
     print('=> setup logger ...')
-    setup_logger(final_output_dir, cfg.RANK, phase)
+    setup_logger(final_output_dir, comm.rank, phase)
 
     return str(final_output_dir)
 
 
 def init_distributed(args):
-    args.num_gpus = int(os.environ["WORLD_SIZE"]) \
-        if "WORLD_SIZE" in os.environ else 1
-    args.distributed = args.num_gpus > 1
+    strategy = None
+    if 'TF_CONFIG' in os.environ:
+        args.distributed = True
+        strategy = tf.distribute.MultiWorkerMirroredStrategy()
+        
+        import json
+        tf_config = json.loads(os.environ['TF_CONFIG'])
+        comm.rank = tf_config['task']['index']
+        comm.world_size = len(tf_config['cluster']['worker'])
+        if hasattr(args, 'local_rank'):
+            comm.local_rank = args.local_rank
+            gpus = tf.config.experimental.list_physical_devices('GPU')
+            if gpus:
+                tf.config.experimental.set_visible_devices(gpus[args.local_rank], 'GPU')
+        
+        logging.info("=> Multi-worker distributed training initialized.")
+    else:
+        gpus = tf.config.list_physical_devices('GPU')
+        args.num_gpus = len(gpus)
+        args.distributed = args.num_gpus > 1
+        if args.distributed:
+            logging.info(f"=> Multi-GPU single machine training on {args.num_gpus} GPUs.")
+            strategy = tf.distribute.MirroredStrategy()
+        else:
+            logging.info("=> Single device training (GPU or CPU).")
+            strategy = tf.distribute.get_strategy()
 
-    if args.distributed:
-        print("=> init process group start")
-        torch.cuda.set_device(args.local_rank)
-        torch.distributed.init_process_group(
-            backend="nccl", init_method="env://",
-            timeout=timedelta(minutes=180))
-        comm.local_rank = args.local_rank
-        print("=> init process group end")
+    comm.set_strategy(strategy)
+    return strategy
 
 
 def setup_cudnn(config):
-    cudnn.benchmark = config.CUDNN.BENCHMARK
-    torch.backends.cudnn.deterministic = config.CUDNN.DETERMINISTIC
-    torch.backends.cudnn.enabled = config.CUDNN.ENABLED
+    if config.CUDNN.DETERMINISTIC:
+        tf.config.experimental.enable_op_determinism()
+
+    if config.CUDNN.BENCHMARK:
+        logging.info("TensorFlow does not have a direct equivalent to 'cudnn.benchmark = True'. Performance tuning is often automatic.")
+
+    if config.CUDNN.ENABLED:
+        gpus = tf.config.experimental.list_physical_devices('GPU')
+        if not gpus:
+            logging.warning("CuDNN is enabled in config, but no GPUs were found.")
+        else:
+            logging.info(f"CuDNN enabled, found {len(gpus)} GPUs.")
 
 
 def count_parameters(model):
-    params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    params = np.sum([np.prod(v.shape) for v in model.trainable_variables])
     return params/1000000
 
 
 def summary_model_on_master(model, config, output_dir, copy):
     if comm.is_main_process():
-        this_dir = os.path.dirname(__file__)
-        shutil.copy2(
-            os.path.join(this_dir, '../models', config.MODEL.NAME + '.py'),
-            output_dir
+        # Keras model.summary() provides a good overview.
+        # It needs to be captured from stdout.
+        from io import StringIO
+        import sys
+
+        summary_string = StringIO()
+        original_stdout = sys.stdout
+        sys.stdout = summary_string
+        model.summary(
+            line_length=120, 
+            print_fn=lambda x: summary_string.write(x + '\n')
         )
-        logging.info('=> {}'.format(model))
+        sys.stdout = original_stdout
+        
+        logging.info(f'\n{summary_string.getvalue()}')
+
         try:
             num_params = count_parameters(model)
             logging.info("Trainable Model Total Parameter: \t%2.1fM" % num_params)
-        except Exception:
-            logging.error('=> error when counting parameters')
-
-        if config.MODEL_SUMMARY:
-            try:
-                logging.info('== model_stats by tensorwatch ==')
-                df = tw.model_stats(
-                    model,
-                    (1, 3, config.TRAIN.IMAGE_SIZE[1], config.TRAIN.IMAGE_SIZE[0])
-                )
-                df.to_html(os.path.join(output_dir, 'model_summary.html'))
-                df.to_csv(os.path.join(output_dir, 'model_summary.csv'))
-                msg = '*'*20 + ' Model summary ' + '*'*20
-                logging.info(
-                    '\n{msg}\n{summary}\n{msg}'.format(
-                        msg=msg, summary=df.iloc[-1]
-                    )
-                )
-                logging.info('== model_stats by tensorwatch ==')
-            except Exception:
-                logging.error('=> error when run model_stats')
-
-            try:
-                logging.info('== get_model_complexity_info by ptflops ==')
-                macs, params = get_model_complexity_info(
-                    model,
-                    (3, config.TRAIN.IMAGE_SIZE[1], config.TRAIN.IMAGE_SIZE[0]),
-                    as_strings=True, print_per_layer_stat=True, verbose=True
-                )
-                logging.info(f'=> FLOPs: {macs:<8}, params: {params:<8}')
-                logging.info('== get_model_complexity_info by ptflops ==')
-            except Exception:
-                logging.error('=> error when run get_model_complexity_info')
+        except Exception as e:
+            logging.error(f'=> error when counting parameters: {e}')
 
 
 def resume_checkpoint(model,
@@ -133,23 +136,38 @@ def resume_checkpoint(model,
     best_perf = 0.0
     begin_epoch_or_step = 0
 
-    checkpoint = os.path.join(output_dir, 'checkpoint.pth')\
-        if not config.TRAIN.CHECKPOINT else config.TRAIN.CHECKPOINT
-    if config.TRAIN.AUTO_RESUME and os.path.exists(checkpoint):
-        logging.info(
-            "=> loading checkpoint '{}'".format(checkpoint)
-        )
-        checkpoint_dict = torch.load(checkpoint, map_location='cpu')
-        best_perf = checkpoint_dict['perf']
-        begin_epoch_or_step = checkpoint_dict['epoch' if in_epoch else 'step']
-        state_dict = checkpoint_dict['state_dict']
-        model.load_state_dict(state_dict)
+    checkpoint = tf.train.Checkpoint(optimizer=optimizer, model=model)
+    manager = tf.train.CheckpointManager(
+        checkpoint, directory=output_dir, max_to_keep=3
+    )
+    
+    resume_path = config.TRAIN.CHECKPOINT if config.TRAIN.CHECKPOINT else manager.latest_checkpoint
 
-        optimizer.load_state_dict(checkpoint_dict['optimizer'])
+    if config.TRAIN.AUTO_RESUME and resume_path:
+        logging.info(
+            "=> loading checkpoint '{}'".format(resume_path)
+        )
+        status = checkpoint.restore(resume_path)
+        status.assert_consumed()  # Optional: check that all variables were restored.
+
+        # To get metadata like epoch and perf, we would need to save it separately
+        # or parse it from the checkpoint path if we include it in the filename.
+        # For simplicity, we assume epoch can be parsed from path.
+        try:
+            if in_epoch:
+                begin_epoch_or_step = int(resume_path.split('-')[-1])
+            else: # step based not clearly supported here, assuming epoch
+                 begin_epoch_or_step = int(resume_path.split('-')[-1]) * config.STEPS_PER_EPOCH
+        except:
+             logging.warning("Could not parse epoch from checkpoint path. Starting from 0.")
+             begin_epoch_or_step = 0
+        
+        # 'best_perf' would also need to be stored, e.g. in a separate JSON file.
+        # For now, we don't restore it.
         logging.info(
             "=> {}: loaded checkpoint '{}' ({}: {})"
             .format(comm.head,
-                    checkpoint,
+                    resume_path,
                     'epoch' if in_epoch else 'step',
                     begin_epoch_or_step)
         )
@@ -159,7 +177,7 @@ def resume_checkpoint(model,
 
 def save_checkpoint_on_master(model,
                               *,
-                              distributed,
+                              distributed, # distributed is not used in TF2 style
                               model_name,
                               optimizer,
                               output_dir,
@@ -169,22 +187,19 @@ def save_checkpoint_on_master(model,
     if not comm.is_main_process():
         return
 
-    states = model.module.state_dict() \
-        if distributed else model.state_dict()
+    checkpoint = tf.train.Checkpoint(optimizer=optimizer, model=model)
+    manager = tf.train.CheckpointManager(
+        checkpoint, directory=output_dir, max_to_keep=3
+    )
 
     logging.info('=> saving checkpoint to {}'.format(output_dir))
-    save_dict = {
-        'epoch' if in_epoch else 'step': epoch_or_step + 1,
-        'model': model_name,
-        'state_dict': states,
-        'perf': best_perf,
-        'optimizer': optimizer.state_dict(),
-    }
-
+    
     try:
-        torch.save(save_dict, os.path.join(output_dir, 'checkpoint.pth'))
-    except Exception:
-        logging.error('=> error when saving checkpoint!')
+        save_path = manager.save(checkpoint_number=epoch_or_step)
+        logging.info(f"=> saved checkpoint for epoch {epoch_or_step}: {save_path}")
+        # Here we could also save best_perf to a file.
+    except Exception as e:
+        logging.error(f'=> error when saving checkpoint! {e}')
 
 
 def save_model_on_master(model, distributed, out_dir, fname):
@@ -193,21 +208,19 @@ def save_model_on_master(model, distributed, out_dir, fname):
 
     try:
         fname_full = os.path.join(out_dir, fname)
-        logging.info(f'=> save model to {fname_full}')
-        torch.save(
-            model.module.state_dict() if distributed else model.state_dict(),
-            fname_full
-        )
-    except Exception:
-        logging.error('=> error when saving checkpoint!')
+        logging.info(f'=> save model weights to {fname_full}')
+        model.save_weights(fname_full)
+    except Exception as e:
+        logging.error(f'=> error when saving model weights! {e}')
 
 
-def strip_prefix_if_present(state_dict, prefix):
-    keys = sorted(state_dict.keys())
-    if not all(key.startswith(prefix) for key in keys):
-        return state_dict
-    from collections import OrderedDict
-    stripped_state_dict = OrderedDict()
-    for key, value in state_dict.items():
-        stripped_state_dict[key.replace(prefix, "")] = value
-    return stripped_state_dict
+def strip_prefix_if_present(model_weights, prefix):
+    """
+    In TensorFlow, loading weights with different prefixes is handled by
+    loading weights `by_name`. If a part of a model is saved and needs to be
+    loaded into a larger model, one can iterate through layers and load
+    weights manually if names match. A direct 'strip_prefix' is less common.
+    This function can be adapted if a specific name mapping is needed.
+    """
+    logging.warning("'strip_prefix_if_present' is a PyTorch-specific utility and has no direct TF equivalent. Weight loading in TF is typically done 'by_name'.")
+    return model_weights

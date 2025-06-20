@@ -2,24 +2,24 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import torch
+import tensorflow as tf
 
 
-@torch.no_grad()
 def accuracy(output, target, topk=(1,)):
     """Computes the precision@k for the specified values of k"""
     if isinstance(output, list):
         output = output[-1]
 
-    maxk = max(topk)
-    batch_size = target.size(0)
-
-    _, pred = output.topk(maxk, 1, True, True)
-    pred = pred.t()
-    correct = pred.eq(target.reshape(1, -1).expand_as(pred))
-
     res = []
     for k in topk:
-        correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
-        res.append(correct_k.mul_(100.0 / batch_size).item())
+        # Ensure target is 1D tensor of integers
+        if len(target.shape) > 1:
+            target = tf.reshape(target, [-1])
+        target = tf.cast(target, tf.int32)
+
+        correct_k = tf.math.in_top_k(
+            targets=target, predictions=output, k=k
+        )
+        accuracy_k = tf.reduce_mean(tf.cast(correct_k, tf.float32)) * 100.0
+        res.append(accuracy_k.numpy())
     return res
