@@ -1,4 +1,3 @@
 mmcv
 titlecase
-torch
-torchvision
+tensorflow
