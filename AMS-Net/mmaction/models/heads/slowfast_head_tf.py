@@ -1,9 +1,9 @@
-import torch
-import torch.nn as nn
-from mmcv.cnn import normal_init
+import tensorflow as tf
+from tensorflow.keras import layers
+from tensorflow.keras.initializers import RandomNormal
 
-from ..registry import HEADS
-from .base import BaseHead
+from ..builder import HEADS
+from .base_tf import BaseHead
 
 
 @HEADS.register_module()
@@ -37,43 +37,44 @@ class SlowFastHead(BaseHead):
         self.init_std = init_std
 
         if self.dropout_ratio != 0:
-            self.dropout = nn.Dropout(p=self.dropout_ratio)
+            self.dropout = layers.Dropout(self.dropout_ratio)
         else:
             self.dropout = None
-        self.fc_cls = nn.Linear(in_channels, num_classes)
+
+        self.fc_cls = layers.Dense(
+            self.num_classes,
+            kernel_initializer=RandomNormal(stddev=self.init_std))
 
         if self.spatial_type == 'avg':
-            self.avg_pool = nn.AdaptiveAvgPool3d((1, 1, 1))
+            self.avg_pool = layers.GlobalAveragePooling3D()
         else:
             self.avg_pool = None
 
-    def init_weights(self):
-        """Initiate the parameters from scratch."""
-        normal_init(self.fc_cls, std=self.init_std)
-
-    def forward(self, x):
+    def call(self, x, training=None):
         """Defines the computation performed at every call.
 
         Args:
-            x (torch.Tensor): The input data.
+            x (tuple[tf.Tensor]): The input data, a tuple containing
+                the fast and slow pathways.
 
         Returns:
-            torch.Tensor: The classification scores for input samples.
+            tf.Tensor: The classification scores for input samples.
         """
-        # ([N, channel_fast, T, H, W], [(N, channel_slow, T, H, W)])
+        # ([N, T, H, W, C_fast], [N, T, H, W, C_slow])
         x_fast, x_slow = x
-        # ([N, channel_fast, 1, 1, 1], [N, channel_slow, 1, 1, 1])
-        x_fast = self.avg_pool(x_fast)
-        x_slow = self.avg_pool(x_slow)
-        # [N, channel_fast + channel_slow, 1, 1, 1]
-        x = torch.cat((x_slow, x_fast), dim=1)
+
+        # ([N, C_fast], [N, C_slow])
+        if self.avg_pool:
+            x_fast = self.avg_pool(x_fast)
+            x_slow = self.avg_pool(x_slow)
+
+        # [N, C_fast + C_slow]
+        x = tf.concat((x_slow, x_fast), axis=1)
 
         if self.dropout is not None:
-            x = self.dropout(x)
+            x = self.dropout(x, training=training)
 
-        # [N x C]
-        x = x.view(x.size(0), -1)
-        # [N x num_classes]
+        # [N, num_classes]
         cls_score = self.fc_cls(x)
 
-        return cls_score
+        return cls_score 
