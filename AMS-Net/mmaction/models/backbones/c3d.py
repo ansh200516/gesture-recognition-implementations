@@ -1,116 +1,97 @@
-import torch.nn as nn
-from mmcv.cnn import ConvModule, constant_init, kaiming_init, normal_init
-from mmcv.runner import load_checkpoint
-from mmcv.utils import _BatchNorm
-
-from ...utils import get_root_logger
-from ..registry import BACKBONES
+import tensorflow as tf
+from tensorflow.keras import layers, Model
 
 
-@BACKBONES.register_module()
-class C3D(nn.Module):
+class C3D(Model):
     """C3D backbone.
-
+    This is a TensorFlow/Keras implementation of the C3D model from the paper:
+    "Learning Spatiotemporal Features with 3D Convolutional Networks"
+    (https://arxiv.org/abs/1412.0767)
+    Note: The original PyTorch implementation used a registry system
+    (@BACKBONES.register_module()) from mmcv to build models from configs.
+    This has been removed as it is specific to the OpenMMLab framework.
+    The original implementation also supported loading pretrained weights from a
+    PyTorch checkpoint file. This TensorFlow version can load weights from a
+    TensorFlow checkpoint (`model.load_weights('path/to/weights')`), but a
+    direct conversion from a PyTorch checkpoint is required and is not
+    handled here.
     Args:
-        pretrained (str | None): Name of pretrained model.
-        style (str): ``pytorch`` or ``caffe``. If set to "pytorch", the
-            stride-two layer is the 3x3 conv layer, otherwise the stride-two
-            layer is the first 1x1 conv layer. Default: 'pytorch'.
-        conv_cfg (dict | None): Config dict for convolution layer.
-            If set to None, it uses ``dict(type='Conv3d')`` to construct
-            layers. Default: None.
-        norm_cfg (dict | None): Config for norm layers. required keys are
-            ``type``, Default: None.
-        act_cfg (dict | None): Config dict for activation layer. If set to
-            None, it uses ``dict(type='ReLU')`` to construct layers.
-            Default: None.
         dropout_ratio (float): Probability of dropout layer. Default: 0.5.
-        init_std (float): Std value for Initiation of fc layers. Default: 0.01.
+        init_std (float): Std value for Initiation of fc layers. Default: 0.005.
     """
 
     def __init__(self,
-                 pretrained=None,
-                 style='pytorch',
-                 conv_cfg=None,
-                 norm_cfg=None,
-                 act_cfg=None,
                  dropout_ratio=0.5,
-                 init_std=0.005):
-        super().__init__()
-        if conv_cfg is None:
-            conv_cfg = dict(type='Conv3d')
-        if act_cfg is None:
-            act_cfg = dict(type='ReLU')
-        self.pretrained = pretrained
-        self.style = style
-        self.conv_cfg = conv_cfg
-        self.norm_cfg = norm_cfg
-        self.act_cfg = act_cfg
+                 init_std=0.005,
+                 **kwargs):
+        super(C3D, self).__init__(**kwargs)
         self.dropout_ratio = dropout_ratio
         self.init_std = init_std
 
-        c3d_conv_param = dict(
-            kernel_size=(3, 3, 3),
-            padding=(1, 1, 1),
-            conv_cfg=self.conv_cfg,
-            norm_cfg=self.norm_cfg,
-            act_cfg=self.act_cfg)
+        # Kernel initializer for convolutional layers
+        conv_kernel_initializer = tf.keras.initializers.HeNormal()
+        # Kernel initializer for dense layers
+        dense_kernel_initializer = tf.keras.initializers.RandomNormal(stddev=self.init_std)
 
-        self.conv1a = ConvModule(3, 64, **c3d_conv_param)
-        self.pool1 = nn.MaxPool3d(kernel_size=(1, 2, 2), stride=(1, 2, 2))
+        self.conv1a = layers.Conv3D(
+            filters=64, kernel_size=3, activation='relu', padding='same',
+            kernel_initializer=conv_kernel_initializer, name='conv1a')
+        self.pool1 = layers.MaxPool3D(
+            pool_size=(1, 2, 2), strides=(1, 2, 2), padding='valid', name='pool1')
 
-        self.conv2a = ConvModule(64, 128, **c3d_conv_param)
-        self.pool2 = nn.MaxPool3d(kernel_size=(2, 2, 2), stride=(2, 2, 2))
+        self.conv2a = layers.Conv3D(
+            filters=128, kernel_size=3, activation='relu', padding='same',
+            kernel_initializer=conv_kernel_initializer, name='conv2a')
+        self.pool2 = layers.MaxPool3D(
+            pool_size=(2, 2, 2), strides=(2, 2, 2), padding='valid', name='pool2')
 
-        self.conv3a = ConvModule(128, 256, **c3d_conv_param)
-        self.conv3b = ConvModule(256, 256, **c3d_conv_param)
-        self.pool3 = nn.MaxPool3d(kernel_size=(2, 2, 2), stride=(2, 2, 2))
+        self.conv3a = layers.Conv3D(
+            filters=256, kernel_size=3, activation='relu', padding='same',
+            kernel_initializer=conv_kernel_initializer, name='conv3a')
+        self.conv3b = layers.Conv3D(
+            filters=256, kernel_size=3, activation='relu', padding='same',
+            kernel_initializer=conv_kernel_initializer, name='conv3b')
+        self.pool3 = layers.MaxPool3D(
+            pool_size=(2, 2, 2), strides=(2, 2, 2), padding='valid', name='pool3')
 
-        self.conv4a = ConvModule(256, 512, **c3d_conv_param)
-        self.conv4b = ConvModule(512, 512, **c3d_conv_param)
-        self.pool4 = nn.MaxPool3d(kernel_size=(2, 2, 2), stride=(2, 2, 2))
+        self.conv4a = layers.Conv3D(
+            filters=512, kernel_size=3, activation='relu', padding='same',
+            kernel_initializer=conv_kernel_initializer, name='conv4a')
+        self.conv4b = layers.Conv3D(
+            filters=512, kernel_size=3, activation='relu', padding='same',
+            kernel_initializer=conv_kernel_initializer, name='conv4b')
+        self.pool4 = layers.MaxPool3D(
+            pool_size=(2, 2, 2), strides=(2, 2, 2), padding='valid', name='pool4')
 
-        self.conv5a = ConvModule(512, 512, **c3d_conv_param)
-        self.conv5b = ConvModule(512, 512, **c3d_conv_param)
-        self.pool5 = nn.MaxPool3d(
-            kernel_size=(2, 2, 2), stride=(2, 2, 2), padding=(0, 1, 1))
+        self.conv5a = layers.Conv3D(
+            filters=512, kernel_size=3, activation='relu', padding='same',
+            kernel_initializer=conv_kernel_initializer, name='conv5a')
+        self.conv5b = layers.Conv3D(
+            filters=512, kernel_size=3, activation='relu', padding='same',
+            kernel_initializer=conv_kernel_initializer, name='conv5b')
 
-        self.fc6 = nn.Linear(8192, 4096)
-        self.fc7 = nn.Linear(4096, 4096)
+        self.zeropad5 = layers.ZeroPadding3D(padding=(0, 1, 1), name='zeropad5')
+        self.pool5 = layers.MaxPool3D(
+            pool_size=(2, 2, 2), strides=(2, 2, 2), padding='valid', name='pool5')
 
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(p=self.dropout_ratio)
+        self.flatten = layers.Flatten(name='flatten')
+        self.fc6 = layers.Dense(
+            4096, activation='relu',
+            kernel_initializer=dense_kernel_initializer, name='fc6')
+        self.dropout = layers.Dropout(rate=self.dropout_ratio)
+        self.fc7 = layers.Dense(
+            4096, activation='relu',
+            kernel_initializer=dense_kernel_initializer, name='fc7')
 
-    def init_weights(self):
-        """Initiate the parameters either from existing checkpoint or from
-        scratch."""
-        if isinstance(self.pretrained, str):
-            logger = get_root_logger()
-            logger.info(f'load model from: {self.pretrained}')
-
-            load_checkpoint(self, self.pretrained, strict=False, logger=logger)
-
-        elif self.pretrained is None:
-            for m in self.modules():
-                if isinstance(m, nn.Conv3d):
-                    kaiming_init(m)
-                elif isinstance(m, nn.Linear):
-                    normal_init(m, std=self.init_std)
-                elif isinstance(m, _BatchNorm):
-                    constant_init(m, 1)
-
-        else:
-            raise TypeError('pretrained must be a str or None')
-
-    def forward(self, x):
+    def call(self, x, training=False):
         """Defines the computation performed at every call.
-
         Args:
-            x (torch.Tensor): The input data.
-                the size of x is (num_batches, 3, 16, 112, 112).
-
+            x (tf.Tensor): The input data.
+                The tensor should have a shape of (num_batches, 16, 112, 112, 3)
+                for default C3D, which is (N, D, H, W, C).
+            training (bool): Official flag for keras model.
         Returns:
-            torch.Tensor: The feature of the input
+            tf.Tensor: The feature of the input
             samples extracted by the backbone.
         """
         x = self.conv1a(x)
@@ -129,11 +110,12 @@ class C3D(nn.Module):
 
         x = self.conv5a(x)
         x = self.conv5b(x)
+        x = self.zeropad5(x)
         x = self.pool5(x)
 
-        x = x.flatten(start_dim=1)
-        x = self.relu(self.fc6(x))
-        x = self.dropout(x)
-        x = self.relu(self.fc7(x))
+        x = self.flatten(x)
+        x = self.fc6(x)
+        x = self.dropout(x, training=training)
+        x = self.fc7(x)
 
         return x
