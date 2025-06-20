@@ -1,6 +1,6 @@
 from .base import BaseWeightedLoss
-from .binary_logistic_regression_loss import BinaryLogisticRegressionLoss
-from .bmn_loss import BMNLoss
+from .binary_logistic_regression_loss_tf import BinaryLogisticRegressionLoss
+from .bmn_loss_tf import BMNLoss
 from .cross_entropy_loss import BCELossWithLogits, CrossEntropyLoss
 from .hvu_loss import HVULoss
 from .nll_loss import NLLLoss

@@ -1,9 +1,9 @@
 from abc import ABCMeta, abstractmethod
 
-import torch.nn as nn
+import tensorflow as tf
 
 
-class BaseWeightedLoss(nn.Module, metaclass=ABCMeta):
+class BaseWeightedLoss(tf.keras.layers.Layer, metaclass=ABCMeta):
     """Base class for loss.
 
     All subclass should overwrite the ``_forward()`` method which returns the
@@ -14,15 +14,15 @@ class BaseWeightedLoss(nn.Module, metaclass=ABCMeta):
             Default: 1.0.
     """
 
-    def __init__(self, loss_weight=1.0):
-        super().__init__()
+    def __init__(self, loss_weight=1.0, **kwargs):
+        super().__init__(**kwargs)
         self.loss_weight = loss_weight
 
     @abstractmethod
     def _forward(self, *args, **kwargs):
         pass
 
-    def forward(self, *args, **kwargs):
+    def call(self, *args, **kwargs):
         """Defines the computation performed at every call.
 
         Args:
@@ -32,7 +32,7 @@ class BaseWeightedLoss(nn.Module, metaclass=ABCMeta):
                 loss.
 
         Returns:
-            torch.Tensor: The calculated loss.
+            tf.Tensor: The calculated loss.
         """
         ret = self._forward(*args, **kwargs)
         if isinstance(ret, dict):
@@ -41,4 +41,4 @@ class BaseWeightedLoss(nn.Module, metaclass=ABCMeta):
                     ret[k] *= self.loss_weight
         else:
             ret *= self.loss_weight
-        return ret
+        return ret 

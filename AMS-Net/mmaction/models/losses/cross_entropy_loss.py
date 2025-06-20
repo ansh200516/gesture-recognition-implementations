@@ -1,8 +1,6 @@
-import torch
-import torch.nn.functional as F
-
+import tensorflow as tf
 from ..registry import LOSSES
-from .base import BaseWeightedLoss
+from .base_tf import BaseWeightedLoss
 
 
 @LOSSES.register_module()
@@ -29,53 +27,54 @@ class CrossEntropyLoss(BaseWeightedLoss):
             using other losses). Default: None.
     """
 
-    def __init__(self, loss_weight=1.0, class_weight=None):
-        super().__init__(loss_weight=loss_weight)
+    def __init__(self, loss_weight=1.0, class_weight=None, **kwargs):
+        super().__init__(loss_weight=loss_weight, **kwargs)
         self.class_weight = None
         if class_weight is not None:
-            self.class_weight = torch.Tensor(class_weight)
+            self.class_weight = tf.constant(class_weight, dtype=tf.float32)
 
     def _forward(self, cls_score, label, **kwargs):
         """Forward function.
 
         Args:
-            cls_score (torch.Tensor): The class score.
-            label (torch.Tensor): The ground truth label.
+            cls_score (tf.Tensor): The class score.
+            label (tf.Tensor): The ground truth label.
             kwargs: Any keyword argument to be used to calculate
                 CrossEntropy loss.
 
         Returns:
-            torch.Tensor: The returned CrossEntropy loss.
+            tf.Tensor: The returned CrossEntropy loss.
         """
-        if cls_score.size() == label.size():
+        if len(cls_score.shape) == len(label.shape) and cls_score.shape == label.shape:
             # calculate loss for soft label
-
-            assert cls_score.dim() == 2, 'Only support 2-dim soft label'
+            assert len(cls_score.shape) == 2, 'Only support 2-dim soft label'
             assert len(kwargs) == 0, \
                 ('For now, no extra args are supported for soft label, '
                  f'but get {kwargs}')
 
-            lsm = F.log_softmax(cls_score, 1)
+            lsm = tf.nn.log_softmax(cls_score, axis=1)
             if self.class_weight is not None:
-                lsm = lsm * self.class_weight.unsqueeze(0)
-            loss_cls = -(label * lsm).sum(1)
+                lsm = lsm * tf.expand_dims(self.class_weight, 0)
+            loss_cls = -tf.reduce_sum(label * lsm, axis=1)
 
             # default reduction 'mean'
             if self.class_weight is not None:
                 # Use weighted average as pytorch CrossEntropyLoss does.
-                # For more information, please visit https://pytorch.org/docs/stable/generated/torch.nn.CrossEntropyLoss.html # noqa
-                loss_cls = loss_cls.sum() / torch.sum(
-                    self.class_weight.unsqueeze(0) * label)
+                loss_cls = tf.reduce_sum(loss_cls) / tf.reduce_sum(
+                    tf.expand_dims(self.class_weight, 0) * label)
             else:
-                loss_cls = loss_cls.mean()
+                loss_cls = tf.reduce_mean(loss_cls)
         else:
             # calculate loss for hard label
+            loss_cls = tf.nn.sparse_softmax_cross_entropy_with_logits(
+                labels=tf.cast(label, dtype=tf.int32), logits=cls_score)
 
             if self.class_weight is not None:
-                assert 'weight' not in kwargs, \
-                    "The key 'weight' already exists."
-                kwargs['weight'] = self.class_weight.to(cls_score.device)
-            loss_cls = F.cross_entropy(cls_score, label, **kwargs)
+                weight = tf.gather(self.class_weight, tf.cast(label, dtype=tf.int32))
+                loss_cls = loss_cls * weight
+                loss_cls = tf.reduce_mean(loss_cls) 
+            else:
+                loss_cls = tf.reduce_mean(loss_cls)
 
         return loss_cls
 
@@ -93,27 +92,26 @@ class BCELossWithLogits(BaseWeightedLoss):
             using other losses). Default: None.
     """
 
-    def __init__(self, loss_weight=1.0, class_weight=None):
-        super().__init__(loss_weight=loss_weight)
+    def __init__(self, loss_weight=1.0, class_weight=None, **kwargs):
+        super().__init__(loss_weight=loss_weight, **kwargs)
         self.class_weight = None
         if class_weight is not None:
-            self.class_weight = torch.Tensor(class_weight)
+            self.class_weight = tf.constant(class_weight, dtype=tf.float32)
 
     def _forward(self, cls_score, label, **kwargs):
         """Forward function.
 
         Args:
-            cls_score (torch.Tensor): The class score.
-            label (torch.Tensor): The ground truth label.
+            cls_score (tf.Tensor): The class score.
+            label (tf.Tensor): The ground truth label.
             kwargs: Any keyword argument to be used to calculate
                 bce loss with logits.
 
         Returns:
-            torch.Tensor: The returned bce loss with logits.
+            tf.Tensor: The returned bce loss with logits.
         """
+        loss_cls = tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.cast(label, dtype=tf.float32), logits=cls_score)
         if self.class_weight is not None:
-            assert 'weight' not in kwargs, "The key 'weight' already exists."
-            kwargs['weight'] = self.class_weight.to(cls_score.device)
-        loss_cls = F.binary_cross_entropy_with_logits(cls_score, label,
-                                                      **kwargs)
-        return loss_cls
+             loss_cls = loss_cls * self.class_weight
+        
+        return tf.reduce_mean(loss_cls)
