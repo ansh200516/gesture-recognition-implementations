@@ -1,0 +1,7 @@
+tensorflow
+tf-models-official
+einops
+timm
+yacs
+numpy
+scipy 
